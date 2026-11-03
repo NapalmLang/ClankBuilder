@@ -1,7 +1,7 @@
 {
-  "name": "buildsystem_prototype",
+  "name": "clank-builder",
   "version": "0.1.0",
-  "description": "A custom builder make in TypeScript because I hate dealing with old CMake setups",
+  "description": "A tiny custom builder make in TypeScript because I hate dealing with old CMake setups",
   "main": "index.js",
   "scripts": {
     "build:node": "ts-node build/index.ts",
