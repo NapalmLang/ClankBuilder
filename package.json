@@ -1,0 +1,21 @@
+{
+  "name": "buildsystem_prototype",
+  "version": "0.1.0",
+  "description": "A custom builder make in TypeScript because I hate dealing with old CMake setups",
+  "main": "index.js",
+  "scripts": {
+    "build:node": "ts-node build/index.ts",
+    "build:bun": "bun build/index.ts",
+    "doctor": "bun run build/index.ts --doctor",
+    "example": "bun run build/build-project.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc && node --test build/tests/*.test.js"
+  },
+  "dependencies": {
+    "ts-node": "^10.9.2",
+    "typescript": "^7.0.2"
+  },
+  "keywords": [ "build-system","custom-builder", "project-builder" ],
+  "author": "Andrés Brugarolas",
+  "license": "ISC"
+}

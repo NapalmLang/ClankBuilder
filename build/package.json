@@ -1,0 +1,16 @@
+{
+  "name": "bruga-build",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Programmable TypeScript C/C++ build system with parallel incremental native builds",
+  "scripts": {
+    "build": "bun run pocketpy.build.ts",
+    "example": "bun run build-project.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc && node --test dist/tests/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3"
+  }
+}

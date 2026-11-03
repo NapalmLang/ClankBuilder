@@ -1,0 +1,16 @@
+/target
+.DS_Store
+/.idea
+/.gradle
+/out
+/.vscode
+/.settings
+/.classpath
+Cargo.lock
+.zig-cache
+zig-out
+log.txt
+run_log.txt
+pnpm-lock.yaml
+pnpm-workspace.yaml
+node_modules
