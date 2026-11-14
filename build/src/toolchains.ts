@@ -2,10 +2,10 @@ import { existsSync, statSync } from 'node:fs';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { availableParallelism, cpus } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import arch from '../arch';
-import { stableHash } from '../extended';
-import type { Architecture } from '../arch';
-import type { ResolvedCompiler, ToolchainName } from './types';
+import arch, { normalizeArchitecture } from '../arch.ts';
+import { stableHash } from '../extended.ts';
+import type { Architecture } from '../arch.ts';
+import type { ResolvedCompiler, ToolchainName } from './types.ts';
 
 export interface ToolchainSearchOptions {
   /** Absolute directory containing compiler binaries, or its installation prefix. */
@@ -146,9 +146,10 @@ function compilerCandidate(
   const version = probe(cc, ['--version'], env);
   if (!version) return undefined;
   const actualName = platform === 'win32' ? (clang ? 'clang-mingw' : 'mingw') : (clang ? 'clang' : 'gcc');
+  const compiledArch = normalizeArchitecture(triple.trim().split('-')[0]);
   return {
     name: actualName, family: 'gnu', cCompiler: cc, cxxCompiler: cxx, linker: cxx, librarian: ar,
-    env, hostArch: nativeArch, runtimeBinDir: bin, targetTriple: triple.trim().split(/\s+/)[0],
+    env, hostArch: compiledArch === 'unknown' ? nativeArch : compiledArch, runtimeBinDir: bin, targetTriple: triple.trim().split(/\s+/)[0],
     identity: stableHash(JSON.stringify({ cc, cxx, ar, version, triple, platform, bin })),
   };
 }
@@ -243,7 +244,7 @@ export function toolchainDoctor(options: ToolchainSearchOptions = {}): string {
   const names: ToolchainName[] = platform === 'win32'
     ? ['clang-mingw', 'mingw', 'msvc', 'clang-cl'] : ['clang', 'gcc'];
   const lines = [
-    `Bruga Build toolchain doctor (${platform}, ${arch()})`,
+    `Clank Builder toolchain doctor (${platform}, ${arch()})`,
     `PATH entries: ${pathDirectories(env, platform).length}`,
     `Custom toolchain: ${options.toolchainDir ?? '(auto-search)'}`,
   ];
@@ -263,8 +264,8 @@ export function toolchainDoctor(options: ToolchainSearchOptions = {}): string {
     lines.push('', 'If no GNU toolchain is found, install MSYS2 CLANG64 or UCRT64:',
       '  CLANG64: pacman -S mingw-w64-clang-x86_64-clang',
       '  UCRT64:  pacman -S mingw-w64-ucrt-x86_64-gcc',
-      '  bun run builder/pocketpy.build.ts --release --compiler clang-mingw --toolchain-dir "C:\\msys64\\clang64\\bin"',
-      '  bun run builder/pocketpy.build.ts --release --compiler mingw --toolchain-dir "C:\\msys64\\ucrt64\\bin"',
+      '  bun run builder/tinypy.build.ts --release --compiler clang-mingw --toolchain-dir "C:\\msys64\\clang64\\bin"',
+      '  bun run builder/tinypy.build.ts --release --compiler mingw --toolchain-dir "C:\\msys64\\ucrt64\\bin"',
       'A standalone LLVM Windows-MSVC-targeted Clang is NOT a complete MinGW toolchain.',
       'Use MSYS2 CLANG64 or provide a complete GNU-targeted Clang + MinGW sysroot.',
     );

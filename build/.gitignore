@@ -1,7 +1,3 @@
-node_modules/
-dist/
-build-ts/
-*.profraw
-*.profdata
-*.gcda
-*.gcno
+/build-ts/
+/build-clank/
+/node_modules/

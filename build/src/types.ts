@@ -1,4 +1,4 @@
-import type { Architecture } from '../arch';
+import type { Architecture } from '../arch.ts';
 
 export type Profile = 'debug' | 'release' | 'relwithdebinfo';
 export type LtoMode = false | 'thin' | 'full';
@@ -49,6 +49,14 @@ export interface TaskContext {
   run(argv: readonly string[], cwd?: string): Promise<void>;
 }
 
+export interface GitCheckoutOptions {
+  readonly name: string;
+  readonly repository: string;
+  readonly ref: string;
+  readonly commit: string;
+  readonly directory: string;
+}
+
 export interface BuildTask {
   readonly name: string;
   readonly dependencies?: readonly string[];
@@ -56,6 +64,8 @@ export interface BuildTask {
   readonly outputs?: readonly string[];
   readonly version?: string;
   readonly action: (context: TaskContext) => void | Promise<void>;
+  /** Called for cached tasks to validate external state before continuing. */
+  readonly verify?: (context: TaskContext) => void | Promise<void>;
 }
 
 export interface ProjectSettings {

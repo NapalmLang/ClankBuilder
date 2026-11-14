@@ -1,14 +1,14 @@
 import { delimiter } from 'node:path';
-import ProjectBuilder, { type BuildOverrides, type LtoMode, type Profile, type ToolchainName } from './main-builder';
-import { runProcess } from './src/process';
-import { toolchainDoctor } from './src/toolchains';
+import ProjectBuilder, { type BuildOverrides, type BuildResult, type LtoMode, type Profile, type ToolchainName } from './main-builder.ts';
+import { runProcess } from './src/process.ts';
+import { toolchainDoctor } from './src/toolchains.ts';
 
 export function usage(): string {
-  return `Bruga Build: TypeScript-driven C/C++ builds
+  return `Clank Builder: TypeScript-driven C/C++ builds
 
-  bun run builder/pocketpy.build.ts [options] [-- program-args]
+  bun run builder/<project>.build.ts [options] [-- program-args]\n  node --experimental-strip-types builder/<project>.build.ts [options]
 
-  --debug                  Unoptimized debug build (default)
+  --debug                  Unoptimized debug build
   --release                Optimized build
   --relwithdebinfo         Optimized build with debug symbols
   --compiler NAME          auto | clang-mingw | mingw | msvc | clang-cl | clang | gcc
@@ -86,9 +86,14 @@ export function parseCli(argv: readonly string[]): CliOptions | 'help' {
 }
 
 /** Small opt-in CLI adapter. Project scripts may call builder.build() directly. */
-export async function runBuildCli(builder: ProjectBuilder, defaultExecutable?: string): Promise<void> {
-  const options = parseCli(process.argv.slice(2));
-  if (options === 'help') { console.log(usage()); return; }
+export async function runBuildCli(
+  builder: ProjectBuilder,
+  defaultExecutable?: string,
+  argv: readonly string[] = process.argv.slice(2),
+  additionalHelp = '',
+): Promise<BuildResult | undefined> {
+  const options = parseCli(argv);
+  if (options === 'help') { console.log(usage() + additionalHelp); return; }
   if (options.doctor) { console.log(toolchainDoctor({ toolchainDir: options.toolchainDir })); return; }
   if (options.clean) { await builder.clean(); console.log('Build directory removed.'); return; }
   const result = await builder.build(options);
@@ -107,4 +112,5 @@ export async function runBuildCli(builder: ProjectBuilder, defaultExecutable?: s
     });
     if (status.code !== 0) process.exitCode = status.code;
   }
+  return result;
 }

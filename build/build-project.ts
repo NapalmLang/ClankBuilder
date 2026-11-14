@@ -1,6 +1,6 @@
 /** Example reusable project definition. Edit the paths for your project. */
-import ProjectBuilder, { sourceTree } from './main-builder';
-import { runBuildCli } from './cli';
+import ProjectBuilder, { sourceTree } from './main-builder.ts';
+import { runBuildCli } from './cli.ts';
 
 const builder = new ProjectBuilder({
   rootDir: process.cwd(),

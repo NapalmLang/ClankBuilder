@@ -1,17 +1,17 @@
-/** Bruga Build: project configuration is ordinary TypeScript, not a second DSL. */
-import { readFile, writeFile, mkdir, rm, rename } from 'node:fs/promises';
+/** Clank Builder: project configuration is ordinary TypeScript, not a second DSL. */
+import { readFile, writeFile, mkdir, rm, rename, lstat } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { stableHash } from './extended';
+import { stableHash } from './extended.ts';
 import { existsSync } from 'node:fs';
-import { detectToolchain, defaultJobs } from './src/toolchains';
-import { parseDepfile, parseMsvcIncludes, ContentFingerprints, scanHeaders, validFile } from './src/depfile';
-import { displayCommand, runPool, runProcess } from './src/process';
-import { discoverSources, isSubPath, validateName } from './src/sources';
-import type { BuildOverrides, BuildResult, Definitions, LtoMode, Profile, ProjectSettings, ResolvedCompiler, SourceInput, Target, BuildTask, TaskContext } from './src/types';
+import { detectToolchain, defaultJobs } from './src/toolchains.ts';
+import { parseDepfile, parseMsvcIncludes, ContentFingerprints, scanHeaders, validFile } from './src/depfile.ts';
+import { displayCommand, runPool, runProcess } from './src/process.ts';
+import { discoverSources, isSubPath, validateName } from './src/sources.ts';
+import type { BuildOverrides, BuildResult, Definitions, LtoMode, Profile, ProjectSettings, ResolvedCompiler, SourceInput, Target, BuildTask, TaskContext, GitCheckoutOptions } from './src/types.ts';
 
-export { sourceTree } from './src/types';
-export type { SourceTree, SourceInput, Target, TargetKind, ProjectSettings, BuildOverrides, BuildResult, ToolchainName, Profile, LtoMode, Definitions, BuildTask, TaskContext } from './src/types';
+export { sourceTree } from './src/types.ts';
+export type { SourceTree, SourceInput, Target, TargetKind, ProjectSettings, BuildOverrides, BuildResult, ToolchainName, Profile, LtoMode, Definitions, BuildTask, TaskContext, GitCheckoutOptions } from './src/types.ts';
 
 interface CachedUnit { fingerprint: string; dependencies: string[]; }
 interface CacheFile { version: 2; units: Record<string, CachedUnit>; links: Record<string, string>; tasks: Record<string, string>; }
@@ -119,7 +119,7 @@ export default class ProjectBuilder {
       throw new Error('Build directory must be a child of the project root, not the root itself.');
     }
     const first = relative(this.root, this.outputBase).split(sep)[0].toLowerCase();
-    if (new Set(['src', 'src2', 'include', 'lib', 'tests', 'tools', 'builder', 'node_modules', '.git', '.hg']).has(first)) {
+    if (new Set(['src', 'examples', 'include', 'lib', 'tests', 'tools', 'builder', 'node_modules', '.git', '.hg']).has(first)) {
       throw new Error(`Refusing a build output directory inside protected source tree: ${this.outputBase}`);
     }
   }
@@ -138,6 +138,92 @@ export default class ProjectBuilder {
     return this;
   }
 
+  /**
+   * Check out a pinned Git dependency before compiling targets which require it.
+   * No Git hooks or shell commands are executed by the builder. A complete
+   * commit SHA is mandatory so a moved tag cannot change the source silently.
+   */
+  addGitCheckout(options: GitCheckoutOptions): this {
+    const name = validateName(options.name);
+    const directory = resolve(this.root, options.directory);
+    const commit = options.commit.toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error(`Git checkout ${name} requires a 40-character commit SHA`);
+    if (!options.repository.trim() || !options.ref.trim() || options.ref.startsWith('-')) {
+      throw new Error(`Git checkout ${name}: invalid repository or ref`);
+    }
+    if (!isSubPath(this.root, directory) || directory === this.outputBase || isSubPath(this.outputBase, directory)) {
+      throw new Error(`Git checkout ${name}: destination must be inside the project and outside the build directory`);
+    }
+    const marker = join(directory, '.clank-checkout.json');
+    const fingerprint = stableHash(JSON.stringify({ repository: options.repository, ref: options.ref, commit }));
+    const verify = async (ctx: TaskContext): Promise<void> => {
+      const actual = (await runProcess(['git', '-C', directory, 'rev-parse', 'HEAD'], {
+        cwd: ctx.rootDir, env: ctx.env,
+      })).stdout.trim().toLowerCase();
+      if (actual !== commit) {
+        throw new Error(`Git checkout ${name} is at ${actual}; expected ${commit}. Remove ${directory} to restore the pinned version.`);
+      }
+      const status = (await runProcess(['git', '-C', directory, 'status', '--porcelain', '--untracked-files=all'], {
+        cwd: ctx.rootDir, env: ctx.env,
+      })).stdout;
+      const changes = status.split(/\r?\n/).filter(line =>
+        line.length > 0 && line !== '?? .clank-checkout.json');
+      if (changes.length) {
+        throw new Error(`Git checkout ${name} has modified or untracked files: ${directory}\n${changes.join('\n')}`);
+      }
+      const recorded = JSON.parse(await readFile(marker, 'utf8')) as { fingerprint?: string };
+      if (recorded.fingerprint !== fingerprint) {
+        throw new Error(`Git checkout ${name} has a stale source marker. Remove ${directory} to refresh it.`);
+      }
+    };
+    return this.addTask({
+      name,
+      version: fingerprint,
+      outputs: [relative(this.root, marker)],
+      verify,
+      action: async ctx => {
+        let exists = false;
+        try {
+          const info = await lstat(directory);
+          if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`Unsafe Git destination: ${directory}`);
+          exists = true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+        if (exists) {
+          if (!existsSync(join(directory, '.git'))) {
+            throw new Error(`Cannot reuse a non-Git directory: ${directory}`);
+          }
+          const actual = (await runProcess(['git', '-C', directory, 'rev-parse', 'HEAD'], {
+            cwd: ctx.rootDir, env: ctx.env,
+          })).stdout.trim().toLowerCase();
+          if (actual !== commit) {
+            throw new Error(`Git checkout ${name} is at ${actual}; expected ${commit}. Remove ${directory} to update it.`);
+          }
+        } else {
+          await mkdir(dirname(directory), { recursive: true });
+          try {
+            await runProcess(['git', 'clone', '--depth', '1', '--branch', options.ref, '--', options.repository, directory], {
+              cwd: ctx.rootDir, env: ctx.env, printOutput: true,
+            });
+          } catch (error) {
+            await rm(directory, { recursive: true, force: true });
+            throw error;
+          }
+          const actual = (await runProcess(['git', '-C', directory, 'rev-parse', 'HEAD'], {
+            cwd: ctx.rootDir, env: ctx.env,
+          })).stdout.trim().toLowerCase();
+          if (actual !== commit) {
+            await rm(directory, { recursive: true, force: true });
+            throw new Error(`Git checkout ${name}: ${options.ref} resolved to ${actual}, expected ${commit}`);
+          }
+        }
+        await writeAtomic(marker, JSON.stringify({ repository: options.repository, ref: options.ref, commit, fingerprint }) + '\n');
+        await verify(ctx);
+      },
+    });
+  }
+
   /** Define independently buildable C/C++ targets; dependencies form a DAG. */
   addTarget(target: Target): this {
     const name = validateName(target.name);
@@ -151,9 +237,10 @@ export default class ProjectBuilder {
   addSharedLibrary(name: string, options: Omit<Target, 'name' | 'kind'>): this { return this.addTarget({ name, kind: 'shared', ...options }); }
 
   /** Compatibility with the original script's one-executable API. */
-  async addFolderRecursivelyToProject(folderPath: string): Promise<void> {
+  addFolderRecursivelyToProject(folderPath: string): Promise<void> {
     this.legacySources.push({ kind: 'source-tree', directory: folderPath,
-      extensions: ['.c', '.cc', '.cpp', '.cxx', '.s', '.S', '.m', '.mm'], exclude: [] });
+      extensions: ['.c', '.h','.cc', '.cpp', '.cxx', '.hpp', '.s', '.S', '.m', '.mm'], exclude: [] });
+    return Promise.resolve();
   }
   addFileToProject(file: string): void { this.legacySources.push(file); }
   setGeneralCompilerFlags(flags: string[]): void { this.settings.commonFlags = [...flags]; }
@@ -317,6 +404,22 @@ export default class ProjectBuilder {
     }
     const targets = this.graph(options.only);
     if (!targets.length) throw new Error('No build targets were defined');
+    const requiredPic = new Set<string>();
+    const targetLookup = new Map(targets.map(target => [target.name, target]));
+    const markStaticDependencies = (target: Target): void => {
+      for (const name of target.dependencies ?? []) {
+        const dependency = targetLookup.get(name);
+        if (!dependency) throw new Error(`Unknown target dependency: ${name}`);
+        if (dependency.kind === 'static') requiredPic.add(name);
+        markStaticDependencies(dependency);
+      }
+    };
+    for (const target of targets) if (target.kind === 'shared') markStaticDependencies(target);
+    for (const name of requiredPic) {
+      if (targetLookup.get(name)?.pic === false && process.platform !== 'win32') {
+        throw new Error(`Static library ${name} must be compiled as PIC because a shared library depends on it`);
+      }
+    }
     const dir = join(this.outputBase, `${profile}-${tc.name}-${tc.hostArch}${lto ? `-${lto}lto` : ''}`);
     if (!options.dryRun) {
       await mkdir(this.outputBase, { recursive: true });
@@ -349,14 +452,14 @@ export default class ProjectBuilder {
       }
       const fingerprint = await hash.group(inputs, [task.name, task.version ?? '0', ...outputs]);
       const validOutputs = outputs.length > 0 && (await Promise.all(outputs.map(validFile))).every(Boolean);
+      const context: TaskContext = {
+        rootDir: this.root, buildDir: dir, env: tc.env,
+        run: async (argv, cwd) => { await runProcess(argv, { cwd: cwd ?? this.root, env: tc.env, printOutput: verbose }); },
+      };
       if (options.rebuild || !validOutputs || cache.tasks[name] !== fingerprint) {
         if (options.dryRun) console.log(`[dry-run] task: ${name}`);
         else {
           if (verbose) console.log(`[task] ${name}`);
-          const context: TaskContext = {
-            rootDir: this.root, buildDir: dir, env: tc.env,
-            run: async (argv, cwd) => { await runProcess(argv, { cwd: cwd ?? this.root, env: tc.env, printOutput: verbose }); },
-          };
           await task.action(context);
           for (const output of outputs) {
             if (!(await validFile(output))) throw new Error(`Task ${name} did not produce ${output}`);
@@ -365,6 +468,8 @@ export default class ProjectBuilder {
           cache.tasks[name] = fingerprint;
           await writeAtomic(cachePath, JSON.stringify(cache, null, 2) + '\n');
         }
+      } else if (task.verify && !options.dryRun) {
+        await task.verify(context);
       }
       taskState.set(name, 'done');
     };
@@ -374,7 +479,7 @@ export default class ProjectBuilder {
       for (const task of target.tasks ?? []) await executeTask(task);
       const sources = await discoverSources(this.root, target.sources, this.outputBase);
       if (!sources.length) throw new Error(`Target ${target.name}: no source files matched`);
-      const units = this.makeUnits(target, sources, dir, tc, profile, lto);
+      const units = this.makeUnits(requiredPic.has(target.name) && target.pic === undefined ? { ...target, pic: true } : target, sources, dir, tc, profile, lto);
       const output = outputPath(dir, target, tc);
       for (const unit of units) compilationCommands.push({ directory: this.root, file: unit.source, arguments: unit.args, output: unit.object });
       const changed: BuildUnit[] = [];
@@ -428,12 +533,27 @@ export default class ProjectBuilder {
       }
       targetData.set(target.name, { target, sources, objects: units.map(x => x.object), output });
       const command = this.linkArgs(target, units, targetData, dir, tc, profile, lto);
-      const inputs = [ ...units.map(x => x.object), ...(target.dependencies ?? []).map(n => {
-        const dep = targetData.get(n)!;
-        return dep.target.kind === 'shared' && process.platform === 'win32'
-          ? join(dir, 'lib', validateName(dep.target.outputName ?? dep.target.name) + (tc.family === 'msvc' ? '.lib' : '.dll.a'))
-          : dep.output;
-      }) ];
+      const inputs = units.map(x => x.object);
+      // Include every transitive archive/import library in the link cache key.
+      // A static archive does not contain the archives it depends on.
+      if (target.kind !== 'static') {
+        const visited = new Set<string>();
+        const includeDependency = (name: string): void => {
+          if (visited.has(name)) return;
+          visited.add(name);
+          const dep = targetData.get(name);
+          if (!dep) throw new Error(`Unbuilt target dependency: ${name}`);
+          inputs.push(dep.target.kind === 'shared' && process.platform === 'win32'
+            ? join(dir, 'lib', validateName(dep.target.outputName ?? dep.target.name) + (tc.family === 'msvc' ? '.lib' : '.dll.a'))
+            : dep.output);
+          for (const child of dep.target.dependencies ?? []) includeDependency(child);
+        };
+        for (const name of target.dependencies ?? []) includeDependency(name);
+        for (const library of [...(this.settings.libraries ?? []), ...(target.libraries ?? [])]) {
+          const candidate = resolve(this.root, library);
+          if (await validFile(candidate)) inputs.push(candidate);
+        }
+      }
       const linkFingerprint = options.dryRun ? '' : await hash.group(inputs, [tc.identity, ...command]);
       if (options.rebuild || options.dryRun || !(await validFile(output)) || cache.links[output] !== linkFingerprint) {
         if (options.dryRun) console.log(`[dry-run] ${displayCommand(command)}`);
@@ -476,4 +596,4 @@ export default class ProjectBuilder {
   }
 }
 
-export { CommandError } from './src/process';
+export { CommandError } from './src/process.ts';
