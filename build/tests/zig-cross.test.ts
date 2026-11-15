@@ -175,15 +175,71 @@ test('FireZstd project script selects modern modules and architecture-specific A
     assert.match(output, /dictBuilder\.c/);
     assert.doesNotMatch(output, /deprecated\.c|legacy\.c/);
     assert.match(output, /zig ar rcs/);
+    // Both library kinds must be built independently for every requested OS.
     assert.match(output, /libzstd\.a/);
+    assert.match(output, /libzstd\.so/);
+    assert.match(output, /libzstd\.dylib/);
+    assert.match(output, /libzstd\.dll/);
+    assert.match(output, /libzstd\.dll\.a/);
+    assert.match(output, /-shared/);
+    assert.match(output, /-dynamiclib/);
+    assert.match(output, /-DZSTD_DLL_EXPORT=1/);
+    assert.match(output, /-DZSTD_MULTITHREAD=1/);
+    assert.equal((output.match(/\[dry-run\] \S+\s+ar rcs /g) ?? []).length, 8,
+      'one static library must be archived per platform');
+    assert.equal((output.match(/\[dry-run\].*\s(?:-dynamiclib|-shared)\s/g) ?? []).length, 8,
+      'one shared library must be linked per platform');
     for (const triple of ['aarch64-macos', 'x86_64-linux-musl', 'x86_64-windows-gnu']) {
       assert.match(output, new RegExp(`\\[cross\\] ${triple}`));
     }
+    const windows = output.slice(output.indexOf('[cross] x86_64-windows-gnu'), output.indexOf('[cross] aarch64-windows-gnu'));
+    assert.match(windows, /-DZSTD_DLL_EXPORT=1/);
+    assert.match(windows, /-Wl,--out-implib,/);
+    assert.match(windows, /libzstd\.dll/);
+    assert.match(windows, /-shared/);
+    const linux = output.slice(output.indexOf('[cross] x86_64-linux-gnu'), output.indexOf('[cross] aarch64-linux-gnu'));
+    assert.match(linux, /libzstd\.so/);
+    assert.doesNotMatch(linux, /-DZSTD_DLL_EXPORT=1/);
     const arm = output.slice(output.indexOf('[cross] aarch64-macos'));
     const x64 = output.slice(output.indexOf('[cross] x86_64-linux-musl'), output.indexOf('[cross] aarch64-linux-musl'));
+    assert.match(arm, /libzstd\.dylib/);
     assert.doesNotMatch(arm, /huf_decompress_amd64\.S/);
     assert.match(arm, /-DZSTD_DISABLE_ASM=1/);
     assert.match(x64, /huf_decompress_amd64\.S/);
     assert.doesNotMatch(x64, /-DZSTD_DISABLE_ASM=1/);
   } finally { rmSync(project, { force: true, recursive: true }); }
+});
+
+test('Zig command response files preserve cc and ar subcommands', async t => {
+  if (process.platform !== 'linux') { t.skip('This test uses a native POSIX Zig-driver shim'); return; }
+  const { spawnSync } = await import('node:child_process');
+  if (spawnSync('clang', ['--version']).status !== 0 || spawnSync('ar', ['--version']).status !== 0) {
+    t.skip('clang and ar are unavailable'); return;
+  }
+  const { root, bin } = fakeZig();
+  try {
+    const zig = join(bin, 'zig');
+    writeFileSync(zig, '#!/bin/sh\n' +
+      'if [ "$1" = "version" ]; then echo 0.15.2; exit 0; fi\n' +
+      'if [ "$1" = "cc" ]; then shift; exec clang "$@"; fi\n' +
+      'if [ "$1" = "ar" ]; then shift; exec ar "$@"; fi\n' +
+      'exit 3\n');
+    chmodSync(zig, 0o755);
+    writeFileSync(join(root, 'source.c'), 'int answer(void) { return 42; }\n');
+    const builder = new ProjectBuilder({
+      rootDir: root, buildDir: 'out', toolchain: 'zig', toolchainDir: bin,
+      profile: 'release', responseFileThreshold: 1,
+    });
+    builder.addStaticLibrary('zstd_static', { sources: ['source.c'], outputName: 'zstd' });
+    builder.addSharedLibrary('zstd_shared', { sources: ['source.c'], outputName: 'zstd' });
+    builder.addCrossTarget('native');
+    const first = await builder.build();
+    assert.equal(first.linked, 2);
+    const native = first.crossTargets?.native;
+    assert.ok(native?.outputs.zstd_static.endsWith('libzstd.a'));
+    assert.ok(native?.outputs.zstd_shared.endsWith('libzstd.so'));
+    const second = await builder.build();
+    assert.equal(second.linked, 0);
+    assert.equal(second.compiled, 0);
+  } finally { rmSync(root, { force: true, recursive: true }); }
 });

@@ -104,7 +104,7 @@ export interface BuildOverrides {
 /** Per-platform overrides for a named C/C++ target. */
 export type CrossTargetOverride = Partial<Pick<Target,
   'sources' | 'defines' | 'cFlags' | 'cxxFlags' | 'asmFlags' |
-  'linkFlags' | 'libraries' | 'pic' | 'threads'
+  'linkFlags' | 'libraries' | 'pic' | 'threads' | 'outputName'
 >>;
 
 /** A registered Zig target; no CLI argument is required to activate it. */

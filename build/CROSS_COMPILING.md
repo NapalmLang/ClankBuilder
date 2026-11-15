@@ -51,12 +51,26 @@ Place the **contents** of [`meta/zstd/lib`](https://github.com/meta/zstd/tree/de
 bun run builder/firezstd.build.ts
 ```
 
-The project generates static `libzstd.a` archives using `zig cc` and `zig ar`. Zstd's `common`, `compress`, `decompress` and `dictBuilder` directories are included; `legacy` and `deprecated` are excluded. Legacy format decoding is disabled via `ZSTD_LEGACY_SUPPORT=0`. Optional x86_64 Huffman assembly is enabled only for x86_64 targets; the others define `ZSTD_DISABLE_ASM=1`. Threading defaults to disabled, matching upstream's static library behavior; edit the `MULTITHREADED` constant to enable it (consumers must then link with the required thread libraries).
+The project generates **both** static `libzstd.a` archives (`zig ar`) and shared libraries (`zig cc`) for each registered platform. The two targets have independent object files and compiler flags: `zstd_static` and `zstd_shared`. Windows emits `bin/libzstd.dll` plus `lib/libzstd.dll.a`, Linux emits `lib/libzstd.so`, and macOS emits `lib/libzstd.dylib`. Shared builds enable `ZSTD_MULTITHREAD` (matching upstream defaults); static archives remain single-threaded by default. Windows shared objects define `ZSTD_DLL_EXPORT=1` so the public API is exported, and non-Windows shared objects use hidden-by-default visibility. Zstd's `common`, `compress`, `decompress` and `dictBuilder` directories are included; `legacy` and `deprecated` are excluded. Legacy format decoding is disabled via `ZSTD_LEGACY_SUPPORT=0`. Optional x86_64 Huffman assembly is enabled only for x86_64 targets; the others define `ZSTD_DISABLE_ASM=1`. Configure `MULTITHREADED_STATIC` and `MULTITHREADED_SHARED` independently in the script if needed (consumers of multithreaded archives must link the required thread libraries).
 
 ## Platform considerations
 
-- These examples build GNU-ABI Windows archives. Linking a library into an MSVC project may require a dedicated ABI-compatible build.
-- Zig's target and libc support can vary with compiler version. Some combinations may require a native SDK or sysroot for application linking; creating a static archive does not prove that a complete executable will link.
+- The Windows DLL and `libzstd.dll.a` import library target the GNU ABI; use an appropriate import library for MSVC consumers. The static archive and import library are different files.
+- Zig's target and libc support can vary with compiler version. Building a macOS dylib or other dynamically linked artifact may require the relevant SDK/sysroot or additional configuration; building an archive alone is not evidence that shared-library linking works. Validate with an actual Zig installation.
 - Test the archives in CI on each actual platform, especially Windows ARM64 and macOS. A successful dry run only validates the build plan.
 - Zig does not produce macOS universal/fat archives automatically. Package the x86_64 and ARM64 Mach-O archives separately or merge with `lipo` in a dedicated packaging step.
 - Pin an upstream Zstd release or Git commit and preserve its BSD license when vendoring sources.
+
+## Expected FireZstd artifacts
+
+```text
+build-zstd/release-zig-x86_64-windows-gnu/lib/libzstd.a
+build-zstd/release-zig-x86_64-windows-gnu/bin/libzstd.dll
+build-zstd/release-zig-x86_64-windows-gnu/lib/libzstd.dll.a
+build-zstd/release-zig-aarch64-linux-musl/lib/libzstd.a
+build-zstd/release-zig-aarch64-linux-musl/lib/libzstd.so
+build-zstd/release-zig-aarch64-macos/lib/libzstd.a
+build-zstd/release-zig-aarch64-macos/lib/libzstd.dylib
+```
+
+You can build only one *project target* on every registered platform with `--target zstd_shared` or `--target zstd_static`. Target triples are always declared in TypeScript, never passed through the CLI.

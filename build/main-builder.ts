@@ -388,12 +388,15 @@ export default class ProjectBuilder {
       }
       return JSON.stringify(value);
     };
-    const content = command.slice(1).map(quote).join('\n') + '\n';
+    // Zig is a multi-call driver: cc/c++/ar must remain before the response file.
+    // A response like `zig @args.rsp` would interpret @args.rsp as a Zig command.
+    const prefixLength = tc.name === 'zig' && ['cc', 'c++', 'ar'].includes(command[1]) ? 2 : 1;
+    const content = command.slice(prefixLength).map(quote).join('\n') + '\n';
     if (process.platform === 'win32' && tc.family === 'msvc') {
       // MSVC link.exe and lib.exe accept UTF-16LE response files. GNU uses UTF-8.
       await writeFile(filename, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(content, 'utf16le')]));
     } else await writeFile(filename, content, 'utf8');
-    return [command[0], `@${filename}`];
+    return [...command.slice(0, prefixLength), `@${filename}`];
   }
 
   async clean(): Promise<void> {
@@ -624,11 +627,15 @@ export default class ProjectBuilder {
         }
       }
       const linkFingerprint = options.dryRun ? '' : await hash.group(inputs, [tc.identity, ...command]);
-      if (options.rebuild || options.dryRun || !(await validFile(output)) || cache.links[output] !== linkFingerprint) {
+      const importLibrary = target.kind === 'shared' && (tc.targetPlatform ?? process.platform) === 'win32'
+        ? join(dir, 'lib', validateName(target.outputName ?? target.name) + (tc.family === 'msvc' ? '.lib' : '.dll.a'))
+        : undefined;
+      const missingImportLibrary = importLibrary !== undefined && !(await validFile(importLibrary));
+      if (options.rebuild || options.dryRun || missingImportLibrary || !(await validFile(output)) || cache.links[output] !== linkFingerprint) {
         if (options.dryRun) console.log(`[dry-run] ${displayCommand(command)}`);
         else {
           await mkdir(dirname(output), { recursive: true });
-          if (target.kind === 'shared' && (tc.targetPlatform ?? process.platform) === 'win32') await mkdir(join(dir, 'lib'), { recursive: true });
+          if (importLibrary) await mkdir(dirname(importLibrary), { recursive: true });
           if (target.kind === 'static') await rm(output, { force: true });
           if (verbose) console.log(displayCommand(command));
           const actualCommand = await this.responseCommand(command, dir, target, tc);
@@ -637,13 +644,15 @@ export default class ProjectBuilder {
             result = await runProcess(actualCommand, { cwd: this.root, env: tc.env });
           } catch (error) {
             await rm(output, { force: true });
-            if (target.kind === 'shared' && (tc.targetPlatform ?? process.platform) === 'win32') {
-              await rm(join(dir, 'lib', validateName(target.outputName ?? target.name) + (tc.family === 'msvc' ? '.lib' : '.dll.a')), { force: true });
-            }
+            if (importLibrary) await rm(importLibrary, { force: true });
             throw error;
           }
           if (result.stdout.trim()) process.stdout.write(result.stdout);
           if (result.stderr.trim()) process.stderr.write(result.stderr);
+          if (importLibrary && !(await validFile(importLibrary))) {
+            await rm(output, { force: true });
+            throw new Error(`Linker did not produce Windows import library: ${importLibrary}`);
+          }
           cache.links[output] = linkFingerprint;
           await writeAtomic(cachePath, JSON.stringify(cache, null, 2) + '\n');
           linked++;
