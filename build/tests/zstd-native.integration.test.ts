@@ -11,7 +11,8 @@ const staticLibrary = '/usr/lib/x86_64-linux-gnu/libzstd.a';
 const sourceProject = resolve(import.meta.dirname, 'fixtures/fire-zstd');
 
 test('links real Zstd statically into a Fire FFI shared library', {
-  skip: process.platform !== 'linux' || process.arch !== 'x64' || !existsSync(staticLibrary),
+  skip: process.platform !== 'linux' || process.arch !== 'x64' || !existsSync(staticLibrary) ||
+    !existsSync(join(sourceProject, 'native')) || !existsSync(join(sourceProject, 'tests', 'native_smoke.c')),
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'clank-fire-test-'));
   try {

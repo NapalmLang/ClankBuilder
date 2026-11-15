@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
-import ProjectBuilder, { sourceTree } from '../main-builder';
-import { runProcess } from '../src/process';
-import { parseCli } from '../cli';
-import { parseDepfile } from '../src/depfile';
-import { globRegex } from '../src/sources';
+import ProjectBuilder, { sourceTree } from '../main-builder.ts';
+import { runProcess } from '../src/process.ts';
+import { parseCli } from '../cli.ts';
+import { parseDepfile } from '../src/depfile.ts';
+import { globRegex } from '../src/sources.ts';
 
 async function fixture(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'bruga build spaces '));
@@ -203,7 +204,9 @@ test('linker and archiver response files support paths containing spaces', async
   assert.equal((await runProcess([output.outputs.sample], { cwd: root })).stdout.trim(), '8');
 });
 
-test('PocketPy-specific CLI configuration selects src and src2 without CMake', async t => {
+test('PocketPy-specific CLI configuration selects src and src2 without CMake', {
+  skip: !existsSync(join(process.cwd(), 'dist', 'pocketpy.build.js')) && 'Optional built PocketPy example is absent',
+}, async t => {
   if (process.platform === 'win32') return;
   const root = await mkdtemp(join(tmpdir(), 'bruga-pocketpy-smoke-'));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
@@ -230,7 +233,7 @@ test('Clang ThinLTO builds executable and archives correctly', async t => {
 // These tests simulate Windows toolchain directories on Linux. They verify
 // discovery logic and executable grouping, not Windows PE/COFF linking.
 import { chmod } from 'node:fs/promises';
-import { detectToolchain, toolchainDoctor } from '../src/toolchains';
+import { detectToolchain, toolchainDoctor } from '../src/toolchains.ts';
 
 async function fakeWindowsToolchain(
   root: string, prefix: string, tools: readonly string[], triple: string,

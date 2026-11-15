@@ -4,14 +4,14 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } 
 import { performance } from 'node:perf_hooks';
 import { stableHash } from './extended.ts';
 import { existsSync } from 'node:fs';
-import { detectToolchain, defaultJobs } from './src/toolchains.ts';
+import { detectToolchain, defaultJobs, parseZigTarget } from './src/toolchains.ts';
 import { parseDepfile, parseMsvcIncludes, ContentFingerprints, scanHeaders, validFile } from './src/depfile.ts';
 import { displayCommand, runPool, runProcess } from './src/process.ts';
 import { discoverSources, isSubPath, validateName } from './src/sources.ts';
-import type { BuildOverrides, BuildResult, Definitions, LtoMode, Profile, ProjectSettings, ResolvedCompiler, SourceInput, Target, BuildTask, TaskContext, GitCheckoutOptions } from './src/types.ts';
+import type { BuildOverrides, BuildResult, Definitions, LtoMode, Profile, ProjectSettings, ResolvedCompiler, SourceInput, Target, BuildTask, TaskContext, GitCheckoutOptions, CrossTargetOptions, CrossTargetOverride } from './src/types.ts';
 
 export { sourceTree } from './src/types.ts';
-export type { SourceTree, SourceInput, Target, TargetKind, ProjectSettings, BuildOverrides, BuildResult, ToolchainName, Profile, LtoMode, Definitions, BuildTask, TaskContext, GitCheckoutOptions } from './src/types.ts';
+export type { SourceTree, SourceInput, Target, TargetKind, ProjectSettings, BuildOverrides, BuildResult, ToolchainName, Profile, LtoMode, Definitions, BuildTask, TaskContext, GitCheckoutOptions, CrossTargetOptions, CrossTargetOverride } from './src/types.ts';
 
 interface CachedUnit { fingerprint: string; dependencies: string[]; }
 interface CacheFile { version: 2; units: Record<string, CachedUnit>; links: Record<string, string>; tasks: Record<string, string>; }
@@ -40,7 +40,7 @@ function compileKind(source: string): 'c' | 'cxx' | 'asm' {
 function ltoFlags(lto: LtoMode, tc: ResolvedCompiler): string[] {
   if (!lto) return [];
   if (tc.family === 'msvc') return ['/GL'];
-  return (tc.name === 'clang' || tc.name === 'clang-mingw') ? [`-flto=${lto}`] : ['-flto'];
+  return (tc.name === 'zig' || tc.name === 'clang' || tc.name === 'clang-mingw') ? [`-flto=${lto}`] : ['-flto'];
 }
 
 function compileOptions(tc: ResolvedCompiler, profile: Profile, lto: LtoMode, kind: 'c' | 'cxx' | 'asm', pic: boolean, threads: boolean): string[] {
@@ -66,15 +66,16 @@ function compileOptions(tc: ResolvedCompiler, profile: Profile, lto: LtoMode, ki
     flags.push(...ltoFlags(lto, tc));
   }
   if (pic) flags.push('-fPIC');
-  if (threads) flags.push('-pthread');
+  if (threads && tc.targetPlatform !== 'win32') flags.push('-pthread');
   return flags;
 }
 
 function outputPath(dir: string, target: Target, tc: ResolvedCompiler): string {
   const stem = validateName(target.outputName ?? target.name);
-  if (target.kind === 'executable') return join(dir, 'bin', stem + (process.platform === 'win32' ? '.exe' : ''));
+  const platform = tc.targetPlatform ?? process.platform;
+  if (target.kind === 'executable') return join(dir, 'bin', stem + (platform === 'win32' ? '.exe' : ''));
   if (target.kind === 'shared') {
-    return join(dir, process.platform === 'win32' ? 'bin' : 'lib', process.platform === 'win32' ? `${stem}.dll` : process.platform === 'darwin' ? `lib${stem}.dylib` : `lib${stem}.so`);
+    return join(dir, platform === 'win32' ? 'bin' : 'lib', platform === 'win32' ? `${stem}.dll` : platform === 'darwin' ? `lib${stem}.dylib` : `lib${stem}.so`);
   }
   return join(dir, 'lib', tc.family === 'msvc' ? `${stem}.lib` : `lib${stem}.a`);
 }
@@ -107,6 +108,7 @@ export default class ProjectBuilder {
   private readonly settings: ProjectSettings;
   private readonly targets = new Map<string, Target>();
   private readonly tasks = new Map<string, BuildTask>();
+  private readonly crossTargets = new Map<string, CrossTargetOptions>();
   private readonly legacySources: SourceInput[] = [];
   private legacyName = 'app';
   private legacyIcon?: string;
@@ -224,6 +226,24 @@ export default class ProjectBuilder {
     });
   }
 
+  /** Register a platform build in TypeScript, not through CLI arguments.
+   * Each registered triple produces its own independent build and cache.
+   */
+  addCrossTarget(triple: string, options: CrossTargetOptions = {}): this {
+    const parsed = parseZigTarget(triple);
+    const name = parsed.triple ?? 'native';
+    if (this.crossTargets.has(name)) throw new Error(`Duplicate cross target: ${name}`);
+    for (const [targetName, overrides] of Object.entries(options.targets ?? {})) {
+      validateName(targetName);
+      if (overrides.sources?.length === 0) throw new Error(`Cross target ${name}: ${targetName} has no sources`);
+    }
+    this.crossTargets.set(name, options);
+    return this;
+  }
+
+  /** True when build() will produce the registered platform matrix. */
+  hasCrossTargets(): boolean { return this.crossTargets.size !== 0; }
+
   /** Define independently buildable C/C++ targets; dependencies form a DAG. */
   addTarget(target: Target): this {
     const name = validateName(target.name);
@@ -295,9 +315,10 @@ export default class ProjectBuilder {
           : kind === 'asm' ? [...(this.settings.asmFlags ?? []), ...(target.asmFlags ?? [])]
             : [...(this.settings.cFlags ?? []), ...(target.cFlags ?? [])]),
       ];
+      const driverArgs = kind === 'cxx' ? (tc.cxxCompilerArgs ?? []) : (tc.cCompilerArgs ?? []);
       const args = isMsvc
-        ? [compiler, ...flags, '/c', source, `/Fo${object}`]
-        : [compiler, ...flags, '-MMD', '-MF', depfile, '-MT', object, '-c', source, '-o', object];
+        ? [compiler, ...driverArgs, ...flags, '/c', source, `/Fo${object}`]
+        : [compiler, ...driverArgs, ...flags, '-MMD', '-MF', depfile, '-MT', object, '-c', source, '-o', object];
       return { source, object, depfile, args, includes: includePaths };
     });
   }
@@ -307,7 +328,7 @@ export default class ProjectBuilder {
     if (target.kind === 'static') {
       return tc.family === 'msvc'
         ? [tc.librarian, '/NOLOGO', `/OUT:${output}`, ...units.map(x => x.object)]
-        : [tc.librarian, 'rcs', output, ...units.map(x => x.object)];
+        : [tc.librarian, ...(tc.librarianArgs ?? []), 'rcs', output, ...units.map(x => x.object)];
     }
     const dependencyOutputs: string[] = [];
     const seen = new Set<string>();
@@ -317,7 +338,7 @@ export default class ProjectBuilder {
       const data = targetData.get(name);
       if (!data) throw new Error(`Unbuilt target dependency: ${name}`);
       if (data.target.kind === 'executable') throw new Error(`Cannot link an executable as a dependency: ${name}`);
-      dependencyOutputs.push(data.target.kind === 'shared' && process.platform === 'win32'
+      dependencyOutputs.push(data.target.kind === 'shared' && (tc.targetPlatform ?? process.platform) === 'win32'
         ? join(dir, 'lib', validateName(data.target.outputName ?? data.target.name) + (tc.family === 'msvc' ? '.lib' : '.dll.a'))
         : data.output);
       for (const child of data.target.dependencies ?? []) addDep(child);
@@ -343,14 +364,15 @@ export default class ProjectBuilder {
     }
     const driver = isCxx ? tc.cxxCompiler : tc.cCompiler;
     const dependentShared = [...seen].some(n => targetData.get(n)?.target.kind === 'shared');
-    const rpath = dependentShared && process.platform !== 'win32'
-      ? [process.platform === 'darwin' ? `-Wl,-rpath,${target.kind === 'shared' ? '@loader_path' : '@loader_path/../lib'}`
+    const platform = tc.targetPlatform ?? process.platform;
+    const rpath = dependentShared && platform !== 'win32'
+      ? [platform === 'darwin' ? `-Wl,-rpath,${target.kind === 'shared' ? '@loader_path' : '@loader_path/../lib'}`
         : `-Wl,-rpath,${target.kind === 'shared' ? '$ORIGIN' : '$ORIGIN/../lib'}`] : [];
-    return [driver, ...units.map(x => x.object), ...dependencyOutputs,
+    return [driver, ...(isCxx ? (tc.cxxCompilerArgs ?? []) : (tc.cCompilerArgs ?? [])), ...units.map(x => x.object), ...dependencyOutputs,
       ...[...libs].flatMap(l => systemLib(l, tc)),
-      ...((target.kind === 'shared') ? [process.platform === 'darwin' ? '-dynamiclib' : '-shared'] : []),
-      ...(threadEnabled ? ['-pthread'] : []), ...ltoFlags(lto, tc), ...(tc.name === 'clang' && lto && process.platform === 'linux' ? ['-fuse-ld=lld'] : []), ...rpath,
-      ...(target.kind === 'shared' && process.platform === 'win32' ? [`-Wl,--out-implib,${join(dir, 'lib', validateName(target.outputName ?? target.name) + '.dll.a')}`] : []),
+      ...((target.kind === 'shared') ? [platform === 'darwin' ? '-dynamiclib' : '-shared'] : []),
+      ...(threadEnabled && platform !== 'win32' ? ['-pthread'] : []), ...ltoFlags(lto, tc), ...(tc.name === 'clang' && lto && platform === 'linux' ? ['-fuse-ld=lld'] : []), ...rpath,
+      ...(target.kind === 'shared' && (tc.targetPlatform ?? process.platform) === 'win32' ? [`-Wl,--out-implib,${join(dir, 'lib', validateName(target.outputName ?? target.name) + '.dll.a')}`] : []),
       ...(this.settings.linkFlags ?? []), ...(target.linkFlags ?? []), '-o', output];
   }
 
@@ -387,10 +409,41 @@ export default class ProjectBuilder {
     await rm(this.outputBase, { recursive: true, force: true });
   }
 
+  /** Build all registered platform targets, or a normal native build when none exist. */
   async build(options: BuildOverrides = {}): Promise<BuildResult> {
+    if (!this.crossTargets.size) return await this.buildOne(options);
+    if (options.toolchain && options.toolchain !== 'zig' && options.toolchain !== 'auto') {
+      throw new Error('Registered cross targets require Zig; remove --compiler or choose zig.');
+    }
+    const started = performance.now();
+    const results: Record<string, BuildResult> = Object.create(null) as Record<string, BuildResult>;
+    const outputs: Record<string, string> = {};
+    let compiled = 0, reused = 0, linked = 0;
+    for (const [triple, configuration] of this.crossTargets) {
+      console.log(`[cross] ${triple}`);
+      const result = await this.buildOne({ ...options, toolchain: 'zig' }, triple, configuration);
+      results[triple] = result;
+      compiled += result.compiled;
+      reused += result.reused;
+      linked += result.linked;
+      for (const [name, path] of Object.entries(result.outputs)) outputs[`${triple}:${name}`] = path;
+    }
+    return {
+      outputs, compiled, reused, linked, durationMs: performance.now() - started,
+      toolchain: 'zig', arch: 'unknown', buildDir: this.outputBase,
+      crossTargets: results,
+    };
+  }
+
+  private async buildOne(
+    options: BuildOverrides,
+    crossTarget?: string,
+    crossOptions?: CrossTargetOptions,
+  ): Promise<BuildResult> {
     const started = performance.now();
     const tc = detectToolchain(options.toolchain ?? this.settings.toolchain ?? 'auto', {
       toolchainDir: options.toolchainDir ?? this.settings.toolchainDir,
+      crossTarget,
     });
     const profile = options.profile ?? this.settings.profile ?? 'debug';
     const lto = options.lto ?? this.settings.lto ?? false;
@@ -402,7 +455,22 @@ export default class ProjectBuilder {
     if (this.targets.size === 0 && this.legacySources.length) {
       this.addExecutable(this.legacyName, { sources: this.legacySources });
     }
-    const targets = this.graph(options.only);
+    const targets = this.graph(options.only).map(target => {
+      const replacement: CrossTargetOverride | undefined = crossOptions?.targets?.[target.name];
+      if (!replacement) return target;
+      return {
+        ...target, ...replacement,
+        defines: { ...target.defines, ...replacement.defines },
+        cFlags: [...(target.cFlags ?? []), ...(replacement.cFlags ?? [])],
+        cxxFlags: [...(target.cxxFlags ?? []), ...(replacement.cxxFlags ?? [])],
+        asmFlags: [...(target.asmFlags ?? []), ...(replacement.asmFlags ?? [])],
+        linkFlags: [...(target.linkFlags ?? []), ...(replacement.linkFlags ?? [])],
+        libraries: [...(target.libraries ?? []), ...(replacement.libraries ?? [])],
+      };
+    });
+    for (const targetName of Object.keys(crossOptions?.targets ?? {})) {
+      if (!this.targets.has(targetName)) throw new Error(`Cross target ${crossTarget}: unknown C/C++ target ${targetName}`);
+    }
     if (!targets.length) throw new Error('No build targets were defined');
     const requiredPic = new Set<string>();
     const targetLookup = new Map(targets.map(target => [target.name, target]));
@@ -416,11 +484,12 @@ export default class ProjectBuilder {
     };
     for (const target of targets) if (target.kind === 'shared') markStaticDependencies(target);
     for (const name of requiredPic) {
-      if (targetLookup.get(name)?.pic === false && process.platform !== 'win32') {
+      if (targetLookup.get(name)?.pic === false && (tc.targetPlatform ?? process.platform) !== 'win32') {
         throw new Error(`Static library ${name} must be compiled as PIC because a shared library depends on it`);
       }
     }
-    const dir = join(this.outputBase, `${profile}-${tc.name}-${tc.hostArch}${lto ? `-${lto}lto` : ''}`);
+    const targetLabel = (tc.name === 'zig' ? (tc.targetTriple ?? tc.hostArch) : tc.hostArch).replace(/[^a-zA-Z0-9_.-]/g, '_');
+    const dir = join(this.outputBase, `${profile}-${tc.name}-${targetLabel}${lto ? `-${lto}lto` : ''}`);
     if (!options.dryRun) {
       await mkdir(this.outputBase, { recursive: true });
       const markerPath = join(this.outputBase, '.bruga-build.json');
@@ -543,7 +612,7 @@ export default class ProjectBuilder {
           visited.add(name);
           const dep = targetData.get(name);
           if (!dep) throw new Error(`Unbuilt target dependency: ${name}`);
-          inputs.push(dep.target.kind === 'shared' && process.platform === 'win32'
+          inputs.push(dep.target.kind === 'shared' && (tc.targetPlatform ?? process.platform) === 'win32'
             ? join(dir, 'lib', validateName(dep.target.outputName ?? dep.target.name) + (tc.family === 'msvc' ? '.lib' : '.dll.a'))
             : dep.output);
           for (const child of dep.target.dependencies ?? []) includeDependency(child);
@@ -559,7 +628,7 @@ export default class ProjectBuilder {
         if (options.dryRun) console.log(`[dry-run] ${displayCommand(command)}`);
         else {
           await mkdir(dirname(output), { recursive: true });
-          if (target.kind === 'shared' && process.platform === 'win32') await mkdir(join(dir, 'lib'), { recursive: true });
+          if (target.kind === 'shared' && (tc.targetPlatform ?? process.platform) === 'win32') await mkdir(join(dir, 'lib'), { recursive: true });
           if (target.kind === 'static') await rm(output, { force: true });
           if (verbose) console.log(displayCommand(command));
           const actualCommand = await this.responseCommand(command, dir, target, tc);
@@ -568,7 +637,7 @@ export default class ProjectBuilder {
             result = await runProcess(actualCommand, { cwd: this.root, env: tc.env });
           } catch (error) {
             await rm(output, { force: true });
-            if (target.kind === 'shared' && process.platform === 'win32') {
+            if (target.kind === 'shared' && (tc.targetPlatform ?? process.platform) === 'win32') {
               await rm(join(dir, 'lib', validateName(target.outputName ?? target.name) + (tc.family === 'msvc' ? '.lib' : '.dll.a')), { force: true });
             }
             throw error;
@@ -585,7 +654,7 @@ export default class ProjectBuilder {
     if (!options.dryRun) await writeAtomic(join(dir, 'compile_commands.json'), JSON.stringify(compilationCommands, null, 2) + '\n');
     const durationMs = performance.now() - started;
     console.log(`Build ${options.dryRun ? 'plan' : 'complete'}: ${compiled} compiled, ${reused} reused, ${linked} linked in ${(durationMs / 1000).toFixed(2)}s`);
-    return { outputs: Object.fromEntries([...targetData].map(([name, data]) => [name, data.output])), compiled, reused, linked, durationMs, toolchain: tc.name, arch: tc.hostArch, buildDir: dir, runtimeBinDir: tc.runtimeBinDir };
+    return { outputs: Object.fromEntries([...targetData].map(([name, data]) => [name, data.output])), compiled, reused, linked, durationMs, toolchain: tc.name, arch: tc.hostArch, buildDir: dir, runtimeBinDir: tc.runtimeBinDir, targetTriple: tc.targetTriple, targetPlatform: tc.targetPlatform };
   }
 
   async compileProject(buildDir?: string, _llvmBinFolder?: string): Promise<BuildResult> {

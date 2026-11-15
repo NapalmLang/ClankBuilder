@@ -11,7 +11,7 @@ export function usage(): string {
   --debug                  Unoptimized debug build
   --release                Optimized build
   --relwithdebinfo         Optimized build with debug symbols
-  --compiler NAME          auto | clang-mingw | mingw | msvc | clang-cl | clang | gcc
+  --compiler NAME          auto | zig | clang-mingw | mingw | msvc | clang-cl | clang | gcc
   --toolchain-dir PATH     Explicit toolchain bin directory or installation prefix
   --doctor                 Diagnose compiler discovery without compiling
   --jobs N                 Maximum parallel compile processes
@@ -67,7 +67,7 @@ export function parseCli(argv: readonly string[]): CliOptions | 'help' {
       const value = inline ?? requiredValue(i++, key);
       if (!value) throw new Error(`Empty value for ${key}`);
       if (key === '--compiler') {
-        if (!['auto', 'clang-mingw', 'mingw', 'msvc', 'clang-cl', 'clang', 'gcc'].includes(value)) {
+        if (!['auto', 'zig', 'clang-mingw', 'mingw', 'msvc', 'clang-cl', 'clang', 'gcc'].includes(value)) {
           throw new Error(`Invalid compiler: ${value}`);
         }
         result.toolchain = value as ToolchainName;
@@ -96,6 +96,9 @@ export async function runBuildCli(
   if (options === 'help') { console.log(usage() + additionalHelp); return; }
   if (options.doctor) { console.log(toolchainDoctor({ toolchainDir: options.toolchainDir })); return; }
   if (options.clean) { await builder.clean(); console.log('Build directory removed.'); return; }
+  if (options.run && builder.hasCrossTargets()) {
+    throw new Error('--run is not available for a cross-target matrix; test binaries on their target system.');
+  }
   const result = await builder.build(options);
   if (options.run && !options.dryRun) {
     const selected = options.only ?? [];

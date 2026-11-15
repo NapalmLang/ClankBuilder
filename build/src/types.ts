@@ -2,7 +2,7 @@ import type { Architecture } from '../arch.ts';
 
 export type Profile = 'debug' | 'release' | 'relwithdebinfo';
 export type LtoMode = false | 'thin' | 'full';
-export type ToolchainName = 'auto' | 'clang' | 'gcc' | 'clang-mingw' | 'mingw' | 'msvc' | 'clang-cl';
+export type ToolchainName = 'auto' | 'zig' | 'clang' | 'gcc' | 'clang-mingw' | 'mingw' | 'msvc' | 'clang-cl';
 export type TargetKind = 'executable' | 'static' | 'shared';
 export type Definition = string | number | boolean | null;
 export type Definitions = Readonly<Record<string, Definition>>;
@@ -101,6 +101,17 @@ export interface BuildOverrides {
   readonly only?: readonly string[];
 }
 
+/** Per-platform overrides for a named C/C++ target. */
+export type CrossTargetOverride = Partial<Pick<Target,
+  'sources' | 'defines' | 'cFlags' | 'cxxFlags' | 'asmFlags' |
+  'linkFlags' | 'libraries' | 'pic' | 'threads'
+>>;
+
+/** A registered Zig target; no CLI argument is required to activate it. */
+export interface CrossTargetOptions {
+  readonly targets?: Readonly<Record<string, CrossTargetOverride>>;
+}
+
 export interface BuildResult {
   readonly outputs: Readonly<Record<string, string>>;
   readonly compiled: number;
@@ -111,18 +122,26 @@ export interface BuildResult {
   readonly arch: Architecture;
   readonly buildDir: string;
   readonly runtimeBinDir?: string;
+  readonly targetTriple?: string;
+  readonly targetPlatform?: NodeJS.Platform;
+  /** Present when this result represents multiple programmatically declared platforms. */
+  readonly crossTargets?: Readonly<Record<string, BuildResult>>;
 }
 
 export interface ResolvedCompiler {
   readonly family: 'gnu' | 'msvc';
   readonly name: Exclude<ToolchainName, 'auto'>;
   readonly cCompiler: string;
+  readonly cCompilerArgs?: readonly string[];
+  readonly cxxCompilerArgs?: readonly string[];
+  readonly librarianArgs?: readonly string[];
   readonly cxxCompiler: string;
   readonly linker: string;
   readonly librarian: string;
   readonly env: NodeJS.ProcessEnv;
   readonly identity: string;
   readonly hostArch: Architecture;
+  readonly targetPlatform?: NodeJS.Platform;
   readonly runtimeBinDir?: string;
   readonly targetTriple?: string;
 }
